@@ -10,6 +10,7 @@ from pptx import Presentation
 from pptx.util import Inches
 from io import BytesIO
 
+# Настройки
 BOT_TOKEN = "8957490808:AAEWFUdFyV8cpYE07rxbh-q2pHjsPrUXVYg"
 API_KEY = "5911714ce3ffbc56f7064a9ad0708e0c" 
 CHAT_API_URL = "https://api.kie.ai/gemini-3.1-pro/v1/chat/completions"
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Функция ожидания и получения картинки
+# Функция для получения картинки
 async def get_image(client, prompt):
     try:
         task = await client.post(f"{IMG_API_URL}/createTask", 
@@ -35,7 +36,8 @@ async def get_image(client, prompt):
                 if url:
                     img_resp = await client.get(url)
                     return BytesIO(img_resp.content)
-    except: return None
+    except Exception as e:
+        logging.error(f"Image error: {e}")
     return None
 
 @dp.message(CommandStart())
@@ -45,35 +47,39 @@ async def start(message: Message):
 @dp.message(F.text)
 async def generate(message: Message):
     topic = message.text
-    msg = await message.answer("⏳ Создаю презентацию (с генерацией картинки)...")
+    msg = await message.answer("⏳ Генерирую...")
     
     async with httpx.AsyncClient(timeout=300.0) as client:
-        # 1. Текст
-        prompt = f"Создай структуру из 3 слайдов на тему '{topic}'. JSON: [{'title': '...', 'content': '...', 'img_prompt': '...'}, ...]"
+        # ИСПОЛЬЗУЕМ ДВОЙНЫЕ СКОБКИ {{ }} ДЛЯ ИИ, ЧТОБЫ ИЗБЕЖАТЬ ОШИБКИ ФОРМАТИРОВАНИЯ
+        prompt = f"Создай структуру из 3 слайдов на тему '{topic}'. Выдай ответ строго в JSON: [{{'title': 'Заголовок', 'content': 'Текст', 'img_prompt': 'Описание картинки'}}, ...]"
+        
         resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]}, 
                                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
-        data = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip())
-
-        # 2. Презентация
-        prs = Presentation()
-        # Слайд с картинкой
-        slide = prs.slides.add_slide(prs.slide_layouts[5])
-        slide.shapes.title.text = topic
-        img_io = await get_image(client, f"Professional cover for {topic}")
-        if img_io:
-            slide.shapes.add_picture(img_io, Inches(1), Inches(2), width=Inches(6))
         
-        # Слайды с текстом
+        content = resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip()
+        data = json.loads(content)
+
+        prs = Presentation()
+        # Слайд с обложкой и картинкой
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = topic
+        
+        img_io = await get_image(client, f"Professional presentation cover about {topic}")
+        if img_io:
+            slide.shapes.add_picture(img_io, Inches(1), Inches(2), width=Inches(5))
+        
+        # Текстовые слайды
         for item in data:
             slide = prs.slides.add_slide(prs.slide_layouts[1])
-            slide.shapes.title.text = item.get('title')
-            slide.placeholders[1].text = item.get('content')
+            slide.shapes.title.text = item.get('title', '...')
+            slide.placeholders[1].text = item.get('content', '')
             
         prs.save("final.pptx")
         await message.answer_document(FSInputFile("final.pptx"))
         await msg.delete()
 
 async def main():
+    # Удаляем вебхук при старте, чтобы не было конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
