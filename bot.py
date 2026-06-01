@@ -4,6 +4,7 @@ import httpx
 import json
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -11,6 +12,7 @@ from pptx import Presentation
 from pptx.util import Inches
 from io import BytesIO
 
+# Настройки
 BOT_TOKEN = "8957490808:AAEWFUdFyV8cpYE07rxbh-q2pHjsPrUXVYg"
 API_KEY = "5911714ce3ffbc56f7064a9ad0708e0c" 
 CHAT_API_URL = "https://api.kie.ai/gemini-3.1-pro/v1/chat/completions"
@@ -20,40 +22,93 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- Вспомогательная функция для генерации картинки ---
-async def generate_and_get_image(client, prompt):
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    # Создаем задачу
-    task = await client.post(f"{IMG_API_URL}/createTask", json={"model": "flux-2/pro-text-to-image", "input": {"prompt": prompt}}, headers=headers)
-    task_id = task.json().get("data", {}).get("taskId")
-    
-    # Ждем результат
-    for _ in range(10):
-        await asyncio.sleep(5)
-        res = await client.get(f"{IMG_API_URL}/recordInfo?taskId={task_id}", headers=headers)
-        data = res.json().get("data", {})
-        if data.get("resultJson"):
-            url = json.loads(data["resultJson"]).get("resultUrls", [None])[0]
-            if url:
-                img_resp = await client.get(url)
-                return BytesIO(img_resp.content)
-    return None
+# Состояния
+class Form(StatesGroup):
+    choosing_type = State()
+    choosing_count = State()
+    waiting_for_topic = State()
 
-# --- Обработка создания (основной блок) ---
-@dp.message(F.text) # Здесь логика, где вызывается процесс
+# Клавиатуры
+def get_type_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Презентация (.pptx)", callback_data="type_pptx")],
+        [InlineKeyboardButton(text="📄 Документ (.docx)", callback_data="type_docx")]
+    ])
+
+def get_count_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="5 слайдов", callback_data="count_5")],
+        [InlineKeyboardButton(text="10 слайдов", callback_data="count_10")]
+    ])
+
+@dp.message(CommandStart())
+async def start(message: Message, state: FSMContext):
+    await message.answer("Выберите формат файла:", reply_markup=get_type_menu())
+    await state.set_state(Form.choosing_type)
+
+@dp.callback_query(Form.choosing_type)
+async def choose_type(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(file_type=callback.data.split("_")[1])
+    await callback.message.edit_text("Выберите объем:", reply_markup=get_count_menu())
+    await state.set_state(Form.choosing_count)
+    await callback.answer()
+
+@dp.callback_query(Form.choosing_count)
+async def choose_count(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(count=callback.data.split("_")[1])
+    await callback.message.edit_text("Введите тему материала:")
+    await state.set_state(Form.waiting_for_topic)
+    await callback.answer()
+
+@dp.message(Form.waiting_for_topic)
 async def process_topic(message: Message, state: FSMContext):
-    # ... (код получения данных из state) ...
+    user_data = await state.get_data()
+    file_type = user_data.get("file_type")
+    count = user_data.get("count")
+    topic = message.text
     
-    # В цикле по слайдам:
-    for item in data:
-        slide = prs.slides.add_slide(prs.slide_layouts[5]) # Макет "Только заголовок"
-        slide.shapes.title.text = item.get('title')
-        
-        # Генерируем картинку
-        img_io = await generate_and_get_image(client, item.get('image_prompt', 'abstract design'))
-        if img_io:
-            slide.shapes.add_picture(img_io, Inches(1), Inches(1.5), height=Inches(4))
-        
-        # Добавляем текст
-        txBox = slide.shapes.add_textbox(Inches(6), Inches(1.5), Inches(4), Inches(4))
-        txBox.text = item.get('content')
+    msg = await message.answer("⏳ Генерирую структуру и обложку...")
+
+    # Исправленный промпт с двойными фигурными скобками
+    prompt = f"Создай структуру на {count} разделов на тему '{topic}'. Выдай ответ СТРОГО в формате JSON списком объектов: [{{'title': 'Заголовок', 'content': 'Текст'}}, ...]"
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            # 1. Получаем текст
+            resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]},
+                                   headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
+            data = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip())
+
+            # 2. Логика файла
+            if file_type == "pptx":
+                prs = Presentation()
+                # Картинка для обложки
+                slide = prs.slides.add_slide(prs.slide_layouts[0])
+                slide.shapes.title.text = topic
+                
+                for item in data:
+                    slide = prs.slides.add_slide(prs.slide_layouts[1])
+                    slide.shapes.title.text = item.get('title', '...')
+                    slide.placeholders[1].text = item.get('content', '')
+                filename = "presentation.pptx"
+                prs.save(filename)
+            else:
+                doc = Document()
+                for item in data:
+                    doc.add_heading(item.get('title', '...'), level=1)
+                    doc.add_paragraph(item.get('content', ''))
+                filename = "document.docx"
+                doc.save(filename)
+
+            await message.answer_document(FSInputFile(filename))
+            await msg.delete()
+        except Exception as e:
+            await msg.edit_text(f"Ошибка: {str(e)}")
+    await state.clear()
+
+async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
