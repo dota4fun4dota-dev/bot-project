@@ -1,49 +1,43 @@
 import asyncio
 import logging
+import httpx
+import json
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from pptx import Presentation
+from docx import Document
 
-# Токен вставлен
 BOT_TOKEN = "8957490808:AAEWFUdFyV8cpYE07rxbh-q2pHjsPrUXVYg"
+API_KEY = "5911714ce3ffbc56f7064a9ad0708e0c" 
+CHAT_API_URL = "https://api.kie.ai/gemini-3.1-pro/v1/chat/completions"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Состояния бота
 class Form(StatesGroup):
     waiting_for_topic = State()
 
-# Меню выбора
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Презентация (.pptx)", callback_data="type_pptx")],
         [InlineKeyboardButton(text="📄 Документ (.docx)", callback_data="type_docx")]
     ])
 
-@dp.startup()
-async def on_startup():
-    await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Бот запущен.")
-
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("Выберите формат материала:", reply_markup=get_main_menu())
+    await message.answer("Привет! Выберите формат материала:", reply_markup=get_main_menu())
 
 @dp.callback_query(F.data.startswith("type_"))
 async def choose_type(callback: CallbackQuery, state: FSMContext):
     file_type = callback.data.split("_")[1]
-    # Сохраняем выбор в состояние FSM
     await state.update_data(file_type=file_type)
     await state.set_state(Form.waiting_for_topic)
-    
-    await callback.message.edit_text(
-        f"Выбрано: {file_type.upper()}. Теперь напишите тему, по которой нужно подготовить материал."
-    )
+    await callback.message.edit_text(f"Выбрано: {file_type.upper()}. Напишите тему.")
     await callback.answer()
 
 @dp.message(Form.waiting_for_topic)
@@ -51,16 +45,40 @@ async def process_topic(message: Message, state: FSMContext):
     user_data = await state.get_data()
     file_type = user_data.get("file_type")
     topic = message.text
-    
-    await message.answer(f"Принято! Создаю {file_type.upper()} на тему: '{topic}'. Пожалуйста, подождите...")
-    
-    # ЗДЕСЬ МЫ ПОЗЖЕ ПОДКЛЮЧИМ ИИ
-    # await generate_material(topic, file_type, message)
-    
+    msg = await message.answer(f"⏳ Генерирую {file_type.upper()} на тему: '{topic}'...")
+
+    # Запрос к ИИ
+    prompt = f"Создай структуру из 5 слайдов/разделов на тему '{topic}'. Выдай JSON: [{'title': '...', 'content': '...'}, ...]"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]},
+                               headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
+        
+        try:
+            content = resp.json()['choices'][0]['message']['content']
+            clean_json = content.replace("```json", "").replace("```", "").strip()
+            data = json.loads(clean_json)
+
+            if file_type == "pptx":
+                prs = Presentation()
+                for item in data:
+                    slide = prs.slides.add_slide(prs.slide_layouts[1])
+                    slide.shapes.title.text = item['title']
+                    slide.placeholders[1].text = item['content']
+                filename = f"{topic[:10]}.pptx"
+                prs.save(filename)
+            else:
+                doc = Document()
+                for item in data:
+                    doc.add_heading(item['title'], level=1)
+                    doc.add_paragraph(item['content'])
+                filename = f"{topic[:10]}.docx"
+                doc.save(filename)
+
+            await message.answer_document(FSInputFile(filename))
+            await msg.delete()
+        except Exception as e:
+            await msg.edit_text(f"Ошибка при генерации: {str(e)}")
     await state.clear()
 
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def main(): await dp.start_polling(bot)
+if __name__ == "__main__": asyncio.run(main())
