@@ -19,59 +19,54 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-async def get_image_bytes(client, prompt):
+# Функция получения картинки
+async def get_image(client, prompt):
     try:
-        # 1. Запуск задачи
         task = await client.post(f"{IMG_API_URL}/createTask", 
                                json={"model": "flux-2/pro-text-to-image", "input": {"prompt": prompt}}, 
                                headers={"Authorization": f"Bearer {API_KEY}"})
         task_id = task.json().get("data", {}).get("taskId")
-        
-        # 2. Ожидание результата (до 60 секунд)
         for _ in range(12):
             await asyncio.sleep(5)
             res = await client.get(f"{IMG_API_URL}/recordInfo?taskId={task_id}", headers={"Authorization": f"Bearer {API_KEY}"})
             data = res.json().get("data", {})
             if data and data.get("resultJson"):
-                result_json = json.loads(data["resultJson"])
-                url = result_json.get("resultUrls", [None])[0]
+                url = json.loads(data["resultJson"]).get("resultUrls", [None])[0]
                 if url:
                     img_resp = await client.get(url)
                     return BytesIO(img_resp.content)
-    except Exception as e:
-        logging.error(f"Ошибка получения картинки: {e}")
+    except: return None
     return None
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("Привет! Введите тему для презентации, и я создам её для вас.")
+    await message.answer("Введите тему для презентации:")
 
 @dp.message(F.text)
 async def generate(message: Message):
     topic = message.text
-    msg = await message.answer("⏳ Генерирую контент и создаю изображения...")
+    msg = await message.answer("⏳ Создаю презентацию...")
     
     async with httpx.AsyncClient(timeout=300.0) as client:
-        # Промпт с экранированными скобками
-        prompt = f"Создай структуру из 3 слайдов на тему '{topic}'. Ответ JSON: [{{'title': 'Заголовок', 'content': 'Текст', 'img_prompt': 'описание картинки для этого слайда'}}, ...]"
-        
+        # Простой промпт без спецсимволов для надежности
+        prompt = f"Создай презентацию на 3 слайда о {topic}. Выдай JSON: [{'title': 'Заголовок', 'content': 'Текст'}]"
         resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]}, 
                                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
         
         data = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip())
 
-        # Создание презентации
         prs = Presentation()
-        for item in data:
-            slide = prs.slides.add_slide(prs.slide_layouts[1])
-            slide.shapes.title.text = item.get('title', '...')
-            slide.placeholders[1].text = item.get('content', '')
+        # Обложка с картинкой
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = topic
+        img_io = await get_image(client, f"professional illustration of {topic}")
+        if img_io:
+            slide.shapes.add_picture(img_io, Inches(1), Inches(2), width=Inches(4))
             
-            # Вставка картинки
-            img_io = await get_image_bytes(client, item.get('img_prompt', topic))
-            if img_io:
-                # Вставляем картинку с проверкой
-                slide.shapes.add_picture(img_io, Inches(5.5), Inches(1.5), width=Inches(3.5))
+        for item in data:
+            s = prs.slides.add_slide(prs.slide_layouts[1])
+            s.shapes.title.text = item.get('title', '...')
+            s.placeholders[1].text = item.get('content', '')
             
         prs.save("final.pptx")
         await message.answer_document(FSInputFile("final.pptx"))
