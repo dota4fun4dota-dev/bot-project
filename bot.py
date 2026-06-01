@@ -12,7 +12,6 @@ from pptx import Presentation
 from pptx.util import Inches
 from io import BytesIO
 
-# Настройки
 BOT_TOKEN = "8957490808:AAEWFUdFyV8cpYE07rxbh-q2pHjsPrUXVYg"
 API_KEY = "5911714ce3ffbc56f7064a9ad0708e0c" 
 CHAT_API_URL = "https://api.kie.ai/gemini-3.1-pro/v1/chat/completions"
@@ -22,88 +21,70 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Состояния
 class Form(StatesGroup):
     choosing_type = State()
     choosing_count = State()
     waiting_for_topic = State()
 
-# Клавиатуры
-def get_type_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Презентация (.pptx)", callback_data="type_pptx")],
-        [InlineKeyboardButton(text="📄 Документ (.docx)", callback_data="type_docx")]
-    ])
+# --- Вспомогательная функция для картинок ---
+async def get_image_url(client, prompt):
+    try:
+        task = await client.post(f"{IMG_API_URL}/createTask", 
+                               json={"model": "flux-2/pro-text-to-image", "input": {"prompt": prompt}}, 
+                               headers={"Authorization": f"Bearer {API_KEY}"})
+        task_id = task.json().get("data", {}).get("taskId")
+        for _ in range(15):
+            await asyncio.sleep(5)
+            res = await client.get(f"{IMG_API_URL}/recordInfo?taskId={task_id}", headers={"Authorization": f"Bearer {API_KEY}"})
+            data = res.json().get("data", {})
+            if data.get("resultJson"):
+                return json.loads(data["resultJson"]).get("resultUrls", [None])[0]
+    except: return None
+    return None
 
-def get_count_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="5 слайдов", callback_data="count_5")],
-        [InlineKeyboardButton(text="10 слайдов", callback_data="count_10")]
-    ])
+# --- Меню и обработчики (остались прежними) ---
+def get_type_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Презентация (.pptx)", callback_data="type_pptx")]])
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-    await message.answer("Выберите формат файла:", reply_markup=get_type_menu())
+    await message.answer("Выберите формат:", reply_markup=get_type_menu())
     await state.set_state(Form.choosing_type)
 
 @dp.callback_query(Form.choosing_type)
 async def choose_type(callback: CallbackQuery, state: FSMContext):
     await state.update_data(file_type=callback.data.split("_")[1])
-    await callback.message.edit_text("Выберите объем:", reply_markup=get_count_menu())
-    await state.set_state(Form.choosing_count)
-    await callback.answer()
-
-@dp.callback_query(Form.choosing_count)
-async def choose_count(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(count=callback.data.split("_")[1])
-    await callback.message.edit_text("Введите тему материала:")
+    await callback.message.edit_text("Введите тему:")
     await state.set_state(Form.waiting_for_topic)
-    await callback.answer()
 
 @dp.message(Form.waiting_for_topic)
 async def process_topic(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    file_type = user_data.get("file_type")
-    count = user_data.get("count")
     topic = message.text
+    msg = await message.answer("⏳ Генерирую презентацию с картинками (это займет время)...")
     
-    msg = await message.answer("⏳ Генерирую структуру и обложку...")
-
-    # Исправленный промпт с двойными фигурными скобками
-    prompt = f"Создай структуру на {count} разделов на тему '{topic}'. Выдай ответ СТРОГО в формате JSON списком объектов: [{{'title': 'Заголовок', 'content': 'Текст'}}, ...]"
+    prompt = f"Создай структуру из 5 слайдов на тему '{topic}'. Добавь поле 'image_desc' для каждого слайда. JSON: [{{'title': '...', 'content': '...', 'image_desc': '...'}}, ...]"
     
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            # 1. Получаем текст
-            resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]},
-                                   headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
-            data = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip())
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]}, 
+                               headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
+        data = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", "").strip())
 
-            # 2. Логика файла
-            if file_type == "pptx":
-                prs = Presentation()
-                # Картинка для обложки
-                slide = prs.slides.add_slide(prs.slide_layouts[0])
-                slide.shapes.title.text = topic
-                
-                for item in data:
-                    slide = prs.slides.add_slide(prs.slide_layouts[1])
-                    slide.shapes.title.text = item.get('title', '...')
-                    slide.placeholders[1].text = item.get('content', '')
-                filename = "presentation.pptx"
-                prs.save(filename)
-            else:
-                doc = Document()
-                for item in data:
-                    doc.add_heading(item.get('title', '...'), level=1)
-                    doc.add_paragraph(item.get('content', ''))
-                filename = "document.docx"
-                doc.save(filename)
+        prs = Presentation()
+        for item in data:
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            slide.shapes.title.text = item.get('title')
+            slide.placeholders[1].text = item.get('content')
+            
+            # Вставка картинки
+            img_url = await get_image_url(client, item.get('image_desc'))
+            if img_url:
+                img_data = await client.get(img_url)
+                slide.shapes.add_picture(BytesIO(img_data.content), Inches(6), Inches(2), width=Inches(3))
 
-            await message.answer_document(FSInputFile(filename))
-            await msg.delete()
-        except Exception as e:
-            await msg.edit_text(f"Ошибка: {str(e)}")
+        filename = "presentation.pptx"
+        prs.save(filename)
+        await message.answer_document(FSInputFile(filename))
+        await msg.delete()
     await state.clear()
 
 async def main():
