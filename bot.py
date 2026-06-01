@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from pptx import Presentation
 from docx import Document
 
+# Твой токен
 BOT_TOKEN = "8957490808:AAEWFUdFyV8cpYE07rxbh-q2pHjsPrUXVYg"
 API_KEY = "5911714ce3ffbc56f7064a9ad0708e0c" 
 CHAT_API_URL = "https://api.kie.ai/gemini-3.1-pro/v1/chat/completions"
@@ -27,6 +28,10 @@ def get_main_menu():
         [InlineKeyboardButton(text="📊 Презентация (.pptx)", callback_data="type_pptx")],
         [InlineKeyboardButton(text="📄 Документ (.docx)", callback_data="type_docx")]
     ])
+
+@dp.startup()
+async def on_startup():
+    await bot.delete_webhook(drop_pending_updates=True)
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -47,13 +52,14 @@ async def process_topic(message: Message, state: FSMContext):
     topic = message.text
     msg = await message.answer(f"⏳ Генерирую {file_type.upper()} на тему: '{topic}'...")
 
-    # Запрос к ИИ
-    prompt = f"Создай структуру из 5 слайдов/разделов на тему '{topic}'. Выдай JSON: [{'title': '...', 'content': '...'}, ...]"
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]},
-                               headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
-        
+    # Исправленный промпт с двойными фигурными скобками
+    prompt = f"Создай структуру из 5 слайдов/разделов на тему '{topic}'. Выдай ответ СТРОГО в формате JSON списком объектов: [{{'title': 'Заголовок', 'content': 'Текст'}}, ...]"
+    
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
+            resp = await client.post(CHAT_API_URL, json={"messages": [{"role": "user", "content": prompt}]},
+                                   headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
+            
             content = resp.json()['choices'][0]['message']['content']
             clean_json = content.replace("```json", "").replace("```", "").strip()
             data = json.loads(clean_json)
@@ -62,23 +68,24 @@ async def process_topic(message: Message, state: FSMContext):
                 prs = Presentation()
                 for item in data:
                     slide = prs.slides.add_slide(prs.slide_layouts[1])
-                    slide.shapes.title.text = item['title']
-                    slide.placeholders[1].text = item['content']
-                filename = f"{topic[:10]}.pptx"
+                    slide.shapes.title.text = item.get('title', 'Без названия')
+                    slide.placeholders[1].text = item.get('content', '')
+                filename = f"presentation_{message.from_user.id}.pptx"
                 prs.save(filename)
             else:
                 doc = Document()
                 for item in data:
-                    doc.add_heading(item['title'], level=1)
-                    doc.add_paragraph(item['content'])
-                filename = f"{topic[:10]}.docx"
+                    doc.add_heading(item.get('title', 'Без названия'), level=1)
+                    doc.add_paragraph(item.get('content', ''))
+                filename = f"document_{message.from_user.id}.docx"
                 doc.save(filename)
 
             await message.answer_document(FSInputFile(filename))
             await msg.delete()
         except Exception as e:
             await msg.edit_text(f"Ошибка при генерации: {str(e)}")
+    
     await state.clear()
 
-async def main(): await dp.start_polling(bot)
-if __name__ == "__main__": asyncio.run(main())
+async def main():
+    await dp.start_polling(bot)
