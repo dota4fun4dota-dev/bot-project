@@ -1,5 +1,4 @@
-python-pptx
-python-docx
-httpx
 aiogram
-pillow
+python-pptx
+httpx
+requests
